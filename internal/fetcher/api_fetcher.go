@@ -7,9 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/bvedant/concurrent-fetch/internal/cache"
+	"github.com/bvedant/concurrent-fetch/internal/logger"
+	"github.com/bvedant/concurrent-fetch/internal/metrics"
 	"github.com/bvedant/concurrent-fetch/internal/utils"
+	"github.com/sony/gobreaker"
+	"go.uber.org/zap"
 )
 
 // APIError represents a detailed API error
@@ -30,6 +35,7 @@ type APIFetcher struct {
 	Headers map[string]string
 	Retry   utils.RetryConfig
 	cache   *cache.Cache
+	breaker *gobreaker.CircuitBreaker
 }
 
 func NewAPIFetcher(url string, headers map[string]string, cache *cache.Cache) *APIFetcher {
@@ -38,6 +44,9 @@ func NewAPIFetcher(url string, headers map[string]string, cache *cache.Cache) *A
 		Headers: headers,
 		Retry:   utils.DefaultRetryConfig,
 		cache:   cache,
+		breaker: gobreaker.NewCircuitBreaker(gobreaker.Settings{
+			Name: url,
+		}),
 	}
 }
 
@@ -54,11 +63,11 @@ func (a *APIFetcher) generateCacheKey() string {
 
 func (a *APIFetcher) FetchData(ctx context.Context) ([]byte, error) {
 	// Check cache first
-	if a.cache != nil {
-		if data, found := a.cache.Get(a.generateCacheKey()); found {
-			return data, nil
-		}
+	if data, found := a.cache.Get(a.generateCacheKey()); found {
+		metrics.CacheHits.WithLabelValues("hit").Inc()
+		return data, nil
 	}
+	metrics.CacheHits.WithLabelValues("miss").Inc()
 
 	var responseData []byte
 
@@ -73,38 +82,52 @@ func (a *APIFetcher) FetchData(ctx context.Context) ([]byte, error) {
 		}
 		req.Header.Set("User-Agent", "concurrent-fetch-app")
 
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			return fmt.Errorf("request failed: %w", err)
-		}
-		defer resp.Body.Close()
+		result, err := a.breaker.Execute(func() (interface{}, error) {
+			// Track request duration
+			start := time.Now()
+			resp, err := http.DefaultClient.Do(req)
+			metrics.RequestDuration.WithLabelValues(a.URL).Observe(time.Since(start).Seconds())
 
-		if resp.StatusCode != http.StatusOK {
-			return &APIError{
-				StatusCode: resp.StatusCode,
-				Message:    fmt.Sprintf("unexpected status code"),
-				URL:        a.URL,
+			if err != nil {
+				logger.Log.Error("API request failed",
+					zap.String("url", a.URL),
+					zap.Error(err),
+				)
+				return nil, err
 			}
-		}
+			defer resp.Body.Close()
 
-		data, err := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+
+			// Check for non-200 status codes
+			if resp.StatusCode != http.StatusOK {
+				return nil, &APIError{
+					StatusCode: resp.StatusCode,
+					Message:    string(body),
+					URL:        a.URL,
+				}
+			}
+
+			// Cache successful response
+			a.cache.Set(a.generateCacheKey(), body)
+
+			return body, nil
+		})
+
 		if err != nil {
-			return fmt.Errorf("failed to read response: %w", err)
+			return err
 		}
 
-		responseData = data
+		responseData = result.([]byte)
 		return nil
 	}
 
 	err := utils.RetryWithBackoff(ctx, a.Retry, operation)
 	if err != nil {
 		return nil, err
-	}
-
-	// Store in cache if successful
-	if a.cache != nil {
-		a.cache.Set(a.generateCacheKey(), responseData)
 	}
 
 	return responseData, nil

@@ -3,6 +3,8 @@ package cache
 import (
 	"sync"
 	"time"
+
+	"github.com/bvedant/concurrent-fetch/internal/metrics"
 )
 
 type CacheEntry struct {
@@ -38,9 +40,11 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 	}
 
 	if time.Since(entry.Timestamp) > c.ttl {
+		metrics.CacheHits.WithLabelValues("miss_expired").Inc()
 		return nil, false
 	}
 
+	metrics.CacheHits.WithLabelValues("hit").Inc()
 	return entry.Data, true
 }
 
