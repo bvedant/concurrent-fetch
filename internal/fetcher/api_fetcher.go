@@ -2,26 +2,46 @@ package fetcher
 
 import (
 	"context"
-	"encoding/json"
-	"time"
+	"fmt"
+	"io"
+	"net/http"
 )
 
 // APIFetcher implements DataFetcher for REST APIs
 type APIFetcher struct {
-	URL string
+	URL     string
+	Headers map[string]string
 }
 
-func NewAPIFetcher(url string) *APIFetcher {
-	return &APIFetcher{URL: url}
+func NewAPIFetcher(url string, headers map[string]string) *APIFetcher {
+	return &APIFetcher{
+		URL:     url,
+		Headers: headers,
+	}
 }
 
 func (a *APIFetcher) FetchData(ctx context.Context) ([]byte, error) {
-	// Simulate API call with timeout
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(1 * time.Second):
-		// Simulated data
-		return json.Marshal(map[string]string{"source": "API", "data": "sample"})
+	req, err := http.NewRequestWithContext(ctx, "GET", a.URL, nil)
+	if err != nil {
+		return nil, err
 	}
+
+	for key, value := range a.Headers {
+		req.Header.Add(key, value)
+	}
+
+	req.Header.Set("User-Agent", "concurrent-fetch-app")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status code: %d", resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
 }

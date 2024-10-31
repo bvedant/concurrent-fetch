@@ -16,13 +16,19 @@ func main() {
 	// Create HTTP server
 	http.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
 		// Create context with timeout
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
 		// Initialize fetchers
 		fetchers := []fetcher.DataFetcher{
-			fetcher.NewAPIFetcher("http://api1.example.com"),
-			fetcher.NewAPIFetcher("http://api2.example.com"),
+			fetcher.NewAPIFetcher(
+				"https://api.github.com/users/microsoft",
+				map[string]string{"Accept": "application/json"},
+			),
+			fetcher.NewAPIFetcher(
+				"https://api.github.com/users/google",
+				map[string]string{"Accept": "application/json"},
+			),
 		}
 
 		// Process data concurrently
