@@ -11,6 +11,7 @@ type RetryConfig struct {
 	InitialBackoff    time.Duration
 	MaxBackoff        time.Duration
 	BackoffMultiplier float64
+	MaxInterval       time.Duration
 }
 
 // DefaultRetryConfig provides sensible default values
@@ -19,6 +20,7 @@ var DefaultRetryConfig = RetryConfig{
 	InitialBackoff:    100 * time.Millisecond,
 	MaxBackoff:        2 * time.Second,
 	BackoffMultiplier: 2.0,
+	MaxInterval:       10 * time.Second,
 }
 
 // RetryWithBackoff executes the given operation with exponential backoff
