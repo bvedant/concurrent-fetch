@@ -35,15 +35,26 @@ type APIFetcher struct {
 	Headers map[string]string
 	Retry   utils.RetryConfig
 	cache   *cache.Cache
+	client  *http.Client
 	breaker *gobreaker.CircuitBreaker
 }
 
 func NewAPIFetcher(url string, headers map[string]string, cache *cache.Cache) *APIFetcher {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+
 	return &APIFetcher{
 		URL:     url,
 		Headers: headers,
 		Retry:   utils.DefaultRetryConfig,
 		cache:   cache,
+		client:  client,
 		breaker: gobreaker.NewCircuitBreaker(gobreaker.Settings{
 			Name: url,
 		}),
@@ -85,7 +96,7 @@ func (a *APIFetcher) FetchData(ctx context.Context) ([]byte, error) {
 		result, err := a.breaker.Execute(func() (interface{}, error) {
 			// Track request duration
 			start := time.Now()
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := a.client.Do(req)
 			metrics.RequestDuration.WithLabelValues(a.URL).Observe(time.Since(start).Seconds())
 
 			if err != nil {

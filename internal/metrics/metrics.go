@@ -30,4 +30,20 @@ var (
 		},
 		[]string{"name"},
 	)
+
+	CircuitBreakerFailures = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "circuit_breaker_failures_total",
+			Help: "Number of circuit breaker failures",
+		},
+		[]string{"name"},
+	)
+
+	CircuitBreakerRequests = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "circuit_breaker_requests_total",
+			Help: "Number of circuit breaker requests",
+		},
+		[]string{"name", "result"},
+	)
 )

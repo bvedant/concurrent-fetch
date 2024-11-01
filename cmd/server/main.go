@@ -6,24 +6,61 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/bvedant/concurrent-fetch/internal/cache"
 	"github.com/bvedant/concurrent-fetch/internal/fetcher"
+	"github.com/bvedant/concurrent-fetch/internal/health"
+	"github.com/bvedant/concurrent-fetch/internal/middleware"
+	"github.com/bvedant/concurrent-fetch/internal/models"
 	"github.com/bvedant/concurrent-fetch/internal/processor"
+	"github.com/bvedant/concurrent-fetch/internal/validation"
 )
 
-func main() {
-	// Create a cache with 5-minute TTL
-	apiCache := cache.NewCache(5 * time.Minute)
+func buildResponse(results []models.Result) []map[string]interface{} {
+	response := make([]map[string]interface{}, 0)
+	for _, result := range results {
+		if result.Error != nil {
+			apiErr, ok := result.Error.(*fetcher.APIError)
+			if ok {
+				response = append(response, map[string]interface{}{
+					"error":       apiErr.Message,
+					"status_code": apiErr.StatusCode,
+					"url":         apiErr.URL,
+				})
+			} else {
+				response = append(response, map[string]interface{}{
+					"error": result.Error.Error(),
+				})
+			}
+			continue
+		}
 
-	// Create HTTP server
-	http.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
-		// Create context with timeout
+		var data map[string]interface{}
+		if err := json.Unmarshal(result.Data, &data); err != nil {
+			response = append(response, map[string]interface{}{
+				"error": "Failed to parse data",
+			})
+			continue
+		}
+		response = append(response, data)
+	}
+	return response
+}
+
+func processHandler(apiCache *cache.Cache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := validation.ValidateRequest(r); err != nil {
+			http.Error(w, err.Error(), http.StatusMethodNotAllowed)
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		// Initialize fetchers with cache
 		fetchers := []fetcher.DataFetcher{
 			fetcher.NewAPIFetcher(
 				"https://api.github.com/repos/golang/go",
@@ -43,47 +80,79 @@ func main() {
 			),
 		}
 
-		// Process data concurrently
 		proc := processor.NewDataProcessor(fetchers...)
 		results := proc.ProcessConcurrently(ctx)
 
-		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
-
-		// Send response
-		response := make([]map[string]interface{}, 0)
-		for _, result := range results {
-			if result.Error != nil {
-				apiErr, ok := result.Error.(*fetcher.APIError)
-				if ok {
-					response = append(response, map[string]interface{}{
-						"error":       apiErr.Message,
-						"status_code": apiErr.StatusCode,
-						"url":         apiErr.URL,
-					})
-				} else {
-					response = append(response, map[string]interface{}{
-						"error": result.Error.Error(),
-					})
-				}
-				continue
-			}
-
-			var data map[string]interface{}
-			if err := json.Unmarshal(result.Data, &data); err != nil {
-				response = append(response, map[string]interface{}{
-					"error": "Failed to parse data",
-				})
-				continue
-			}
-			response = append(response, data)
-		}
+		response := buildResponse(results)
 
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			log.Printf("Error encoding response: %v", err)
 		}
+	}
+}
+
+func main() {
+	log.Printf("Initializing server components...")
+
+	apiCache := cache.NewCache(5 * time.Minute)
+	log.Printf("Cache initialized with 5-minute TTL")
+
+	healthChecker := health.NewHealthChecker()
+
+	healthChecker.AddCheck("cache", func() error {
+		testKey := "health-check"
+		testData := []byte("test")
+
+		apiCache.Set(testKey, testData)
+		data, found := apiCache.Get(testKey)
+
+		if !found {
+			return fmt.Errorf("cache health check failed: data not found")
+		}
+		if string(data) != string(testData) {
+			return fmt.Errorf("cache health check failed: data mismatch")
+		}
+		return nil
 	})
 
-	fmt.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	rateLimiter := middleware.NewRateLimiter(10, 10)
+	log.Printf("Rate limiter initialized: 10 requests/second per IP")
+
+	http.Handle("/health", healthChecker.Handler())
+	http.Handle("/process", rateLimiter.Middleware(processHandler(apiCache)))
+
+	log.Printf("Configuring HTTP server...")
+
+	srv := &http.Server{
+		Addr:         ":8080",
+		Handler:      http.DefaultServeMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-sigChan
+		log.Printf("Received shutdown signal: %v", sig)
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		log.Printf("Initiating graceful shutdown...")
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		} else {
+			log.Printf("Server shutdown completed successfully")
+		}
+	}()
+
+	log.Printf("Server starting on :8080")
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		log.Fatalf("HTTP server error: %v", err)
+	}
+
+	log.Printf("Server stopped")
 }
