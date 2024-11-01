@@ -61,21 +61,20 @@ func processHandler(apiCache *cache.Cache) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
+		headers := map[string]string{
+			"Accept":     "application/json",
+			"User-Agent": "concurrent-fetch-app",
+		}
+
 		fetchers := []fetcher.DataFetcher{
 			fetcher.NewAPIFetcher(
-				"https://api.github.com/repos/golang/go",
-				map[string]string{
-					"Accept":     "application/json",
-					"User-Agent": "concurrent-fetch-app",
-				},
+				"https://api.agify.io/?name=bella",
+				headers,
 				apiCache,
 			),
 			fetcher.NewAPIFetcher(
-				"https://api.github.com/repos/kubernetes/kubernetes",
-				map[string]string{
-					"Accept":     "application/json",
-					"User-Agent": "concurrent-fetch-app",
-				},
+				"https://api.nationalize.io/?name=nathan",
+				headers,
 				apiCache,
 			),
 		}
@@ -86,8 +85,11 @@ func processHandler(apiCache *cache.Cache) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		response := buildResponse(results)
 
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			log.Printf("Error encoding response: %v", err)
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "    ")
+		if err := encoder.Encode(response); err != nil {
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			return
 		}
 	}
 }
