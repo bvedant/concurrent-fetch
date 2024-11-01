@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -74,8 +75,67 @@ func (a *App) handleHealth() http.HandlerFunc {
 
 func (a *App) handleFetch() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Implement your fetch logic here
-		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		urls := r.URL.Query()["url"]
+		if len(urls) == 0 {
+			http.Error(w, "No URLs provided", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+		results := make([]map[string]interface{}, 0, len(urls))
+		errors := make([]error, 0)
+
+		// Create a channel for results
+		type result struct {
+			url  string
+			data []byte
+			err  error
+		}
+		resultChan := make(chan result, len(urls))
+
+		// Fetch concurrently
+		for _, url := range urls {
+			go func(url string) {
+				client := NewClient(url, a.config)
+				data, err := client.Get(ctx, "")
+				resultChan <- result{url: url, data: data, err: err}
+			}(url)
+		}
+
+		// Collect results
+		for i := 0; i < len(urls); i++ {
+			res := <-resultChan
+			if res.err != nil {
+				errors = append(errors, fmt.Errorf("failed to fetch %s: %w", res.url, res.err))
+				continue
+			}
+
+			var data map[string]interface{}
+			if err := json.Unmarshal(res.data, &data); err != nil {
+				errors = append(errors, fmt.Errorf("failed to parse %s: %w", res.url, err))
+				continue
+			}
+			results = append(results, data)
+		}
+
+		response := map[string]interface{}{
+			"results": results,
+		}
+		if len(errors) > 0 {
+			errMsgs := make([]string, len(errors))
+			for i, err := range errors {
+				errMsgs[i] = err.Error()
+			}
+			response["errors"] = errMsgs
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
